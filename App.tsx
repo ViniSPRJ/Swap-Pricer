@@ -1,7 +1,6 @@
-
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Page, SwapDeal, PricingResult, CashflowRow } from './types';
-import { analyzeSwapDeal } from './services/aiService';
+import { analyzeSwapDeal, generatePricingCode } from './services/aiService';
 import { 
   LineChart, 
   Line, 
@@ -58,12 +57,6 @@ const generateSmartCashflows = (deal: SwapDeal): CashflowRow[] => {
     // Simple Interest = Notional * Rate% * (Months/12)
     const timeFraction = monthsToAdd / 12;
     
-    // Leg 1 (Payer/Receiver based on context, usually Payer in standard swap notation for Leg 1)
-    // Assuming Leg 1 is Receiver for this calculation logic as per the results page label "Perna Ativa (Recebimento)"
-    // However, the PricerForm labels Leg 1 as Payer. Let's align with PricerForm: Leg 1 = Payer (-), Leg 2 = Receiver (+)
-    // Wait, standard XCCY: usually exchange notional at start/end. Here we just show interest flows.
-    
-    // Let's randomize rates slightly to simulate floating if needed, or use fixed.
     const leg1Rate = deal.leg1.type === 'Floating' ? deal.leg1.rate + (Math.random() * 0.5 - 0.25) : deal.leg1.rate;
     const leg2Rate = deal.leg2.type === 'Floating' ? deal.leg2.rate + (Math.random() * 0.5 - 0.25) : deal.leg2.rate;
 
@@ -73,22 +66,10 @@ const generateSmartCashflows = (deal: SwapDeal): CashflowRow[] => {
     // Discount factor (simple decay)
     const discountFactor = 1 / Math.pow(1.04, period * timeFraction); // Assuming 4% discount rate
 
-    // PV in base currency (using simplified Leg 2 currency as reporting currency for demo)
-    // In a real app, we'd convert Leg 1 flow to Leg 2 currency using FX forwards.
-    // Here: Simple math for demo.
-    const fxRate = 1.0; // Assume parity for simple visual 
-    const netFlow = leg1Interest - leg2Interest; // Paying Leg 1, Receiving Leg 2? Or vice versa.
-    
-    // Let's assume we display raw flows in their currencies for the table columns, 
-    // but PV is calculated in a consolidated view.
-    
     rows.push({
       date: dateStr,
       leg1Flow: Number(leg1Interest.toFixed(2)),
-      leg2Flow: Number((-leg2Interest).toFixed(2)), // Convention: Pay = negative, but let's keep flows absolute in table columns or signed? 
-      // Re-aligning with UI screenshot: Leg 1 (Positive), Leg 2 (Negative).
-      // UI Screenshot says: Leg 1 (Receiving), Leg 2 (Paying).
-      // Let's follow the UI screenshot logic for the Result Page.
+      leg2Flow: Number((-leg2Interest).toFixed(2)), 
       discountFactor: Number(discountFactor.toFixed(4)),
       presentValue: Number((Math.abs(leg1Interest) - Math.abs(leg2Interest) * discountFactor).toFixed(2))
     });
@@ -220,13 +201,14 @@ const Dashboard = ({ setPage, deals }: { setPage: (p: Page) => void, deals: Swap
                       </td>
                   </tr>
               ) : (
-                  deals.map((deal) => {
+                  deals.map((deal, index) => {
                       const isActive = deal.status === 'Active';
                       const isPending = deal.status === 'Pending';
                       const statusClass = isActive ? 'bg-green-100 text-green-800' : isPending ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-600';
-                      
+                      const rowKey = deal.id || `deal-${index}`;
+
                       return (
-                        <tr key={deal.id} className="hover:bg-gray-50 transition-colors group">
+                        <tr key={rowKey} className="hover:bg-gray-50 transition-colors group">
                           <td className="px-6 py-4 font-medium text-gray-900 group-hover:text-primary transition-colors">{deal.id}</td>
                           <td className="px-6 py-4">{deal.leg1.currency} / {deal.leg2.currency}</td>
                           <td className="px-6 py-4">{deal.leg1.notional.toLocaleString()} / {deal.leg2.notional.toLocaleString()}</td>
@@ -415,9 +397,36 @@ const PricerForm = ({ onCalculate }: { onCalculate: (deal: SwapDeal) => void }) 
 };
 
 const ResultsPage = ({ deal, result }: { deal: SwapDeal, result: PricingResult }) => {
+  const [activeTab, setActiveTab] = useState<'overview' | 'code'>('overview');
+  const [codeLanguage, setCodeLanguage] = useState<'python' | 'cpp'>('python');
+  const [generatedCode, setGeneratedCode] = useState<string>("");
+  const [loadingCode, setLoadingCode] = useState(false);
+
   const [aiAnalysis, setAiAnalysis] = useState<string>("");
   const [loadingAi, setLoadingAi] = useState(false);
   const [showCashflows, setShowCashflows] = useState(true);
+
+  // --- Logic ---
+  
+  const handleGenerateCode = useCallback(async (lang: 'python' | 'cpp') => {
+     setCodeLanguage(lang);
+     setLoadingCode(true);
+     try {
+         const code = await generatePricingCode(deal, lang);
+         setGeneratedCode(code);
+     } catch(e) {
+         setGeneratedCode("// Error generating code.");
+     }
+     setLoadingCode(false);
+  }, [deal]);
+
+  useEffect(() => {
+    // If user switches to code tab and it's empty, auto-generate
+    if (activeTab === 'code' && !generatedCode) {
+        handleGenerateCode(codeLanguage);
+    }
+  }, [activeTab, generatedCode, codeLanguage, handleGenerateCode]);
+
 
   const handleAiAnalyze = async () => {
     setLoadingAi(true);
@@ -449,188 +458,260 @@ const ResultsPage = ({ deal, result }: { deal: SwapDeal, result: PricingResult }
            <h1 className="text-3xl font-black tracking-tight text-gray-900">Pricing Results</h1>
            <p className="text-gray-500">Operation ID: {deal.id}</p>
         </div>
-        <button className="bg-white border border-gray-300 text-gray-700 px-4 py-2 rounded-lg font-bold text-sm flex items-center gap-2 hover:bg-gray-50 shadow-sm transition-colors">
-          <span className="material-symbols-outlined">download</span>
-          Export Report
-        </button>
+        <div className="flex gap-3">
+            <button 
+                onClick={() => setActiveTab('overview')}
+                className={`px-4 py-2 rounded-lg font-bold text-sm transition-colors border ${activeTab === 'overview' ? 'bg-gray-100 border-gray-300 text-gray-900' : 'bg-white border-gray-200 text-gray-500 hover:bg-gray-50'}`}
+            >
+                Financial Dashboard
+            </button>
+            <button 
+                onClick={() => setActiveTab('code')}
+                className={`px-4 py-2 rounded-lg font-bold text-sm transition-colors border ${activeTab === 'code' ? 'bg-gray-100 border-gray-300 text-gray-900' : 'bg-white border-gray-200 text-gray-500 hover:bg-gray-50'}`}
+            >
+                Model Code
+            </button>
+        </div>
       </header>
 
-      {/* KPIs */}
-      <section className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-         <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm flex flex-col gap-2 hover:shadow-md transition-shadow">
-            <p className="text-gray-500 font-medium">Total NPV</p>
-            <p className="text-3xl font-bold text-gray-900 tracking-tight">{result.npvTotalFormatted}</p>
-            <p className="text-positive font-medium text-sm flex items-center gap-1">
-                <span className="material-symbols-outlined text-sm">trending_up</span>
-                +1.25%
-            </p>
-         </div>
-         <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm flex flex-col gap-2 hover:shadow-md transition-shadow">
-            <p className="text-gray-500 font-medium">Swap Spread</p>
-            <p className="text-3xl font-bold text-gray-900 tracking-tight">{result.spread.toFixed(1)} bps</p>
-            <p className="text-negative font-medium text-sm flex items-center gap-1">
-                <span className="material-symbols-outlined text-sm">trending_down</span>
-                -0.5 bps
-            </p>
-         </div>
-         <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm flex flex-col gap-2 hover:shadow-md transition-shadow">
-            <p className="text-gray-500 font-medium">Principal Value</p>
-            <p className="text-3xl font-bold text-gray-900 tracking-tight">{deal.leg2.currency} {result.principal.toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
-            <p className="text-gray-400 text-sm font-medium">&nbsp;</p>
-         </div>
-      </section>
+      {activeTab === 'overview' && (
+        <div className="animate-in fade-in slide-in-from-bottom-2 duration-500">
+            {/* KPIs */}
+            <section className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm flex flex-col gap-2 hover:shadow-md transition-shadow">
+                    <p className="text-gray-500 font-medium">Total NPV</p>
+                    <p className="text-3xl font-bold text-gray-900 tracking-tight">{result.npvTotalFormatted}</p>
+                    <p className="text-positive font-medium text-sm flex items-center gap-1">
+                        <span className="material-symbols-outlined text-sm">trending_up</span>
+                        +1.25%
+                    </p>
+                </div>
+                <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm flex flex-col gap-2 hover:shadow-md transition-shadow">
+                    <p className="text-gray-500 font-medium">Swap Spread</p>
+                    <p className="text-3xl font-bold text-gray-900 tracking-tight">{result.spread.toFixed(1)} bps</p>
+                    <p className="text-negative font-medium text-sm flex items-center gap-1">
+                        <span className="material-symbols-outlined text-sm">trending_down</span>
+                        -0.5 bps
+                    </p>
+                </div>
+                <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm flex flex-col gap-2 hover:shadow-md transition-shadow">
+                    <p className="text-gray-500 font-medium">Principal Value</p>
+                    <p className="text-3xl font-bold text-gray-900 tracking-tight">{deal.leg2.currency} {result.principal.toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
+                    <p className="text-gray-400 text-sm font-medium">&nbsp;</p>
+                </div>
+            </section>
 
-      {/* AI Analyst Section */}
-      <section className="mb-8">
-        <div className="bg-gradient-to-br from-blue-600 to-indigo-700 rounded-xl p-6 text-white shadow-lg relative overflow-hidden">
-           <div className="absolute top-0 right-0 p-4 opacity-10">
-                <span className="material-symbols-outlined text-9xl">psychology</span>
-           </div>
-           <div className="relative z-10">
-               <div className="flex flex-wrap justify-between items-start mb-4 gap-4">
-                  <div className="flex items-center gap-4">
-                     <div className="bg-white/20 p-2.5 rounded-xl backdrop-blur-sm">
-                        <span className="material-symbols-outlined text-white text-3xl">psychology</span>
-                     </div>
-                     <div>
-                       <h3 className="font-bold text-xl">AI Deal Analyst</h3>
-                       <p className="text-blue-100 text-sm font-medium opacity-90">Powered by Google Gemini 2.5 Flash</p>
-                     </div>
-                  </div>
-                  {!aiAnalysis && (
-                    <button 
-                      onClick={handleAiAnalyze} 
-                      disabled={loadingAi}
-                      className="bg-white text-blue-600 px-5 py-2.5 rounded-lg font-bold text-sm hover:bg-blue-50 disabled:opacity-70 disabled:cursor-not-allowed transition-all shadow-md flex items-center gap-2"
-                    >
-                      {loadingAi ? (
-                          <>
-                            <span className="animate-spin material-symbols-outlined text-sm">refresh</span>
-                            Analyzing Deal...
-                          </>
-                      ) : (
-                          <>
-                            <span className="material-symbols-outlined text-sm">play_arrow</span>
-                            Run Analysis
-                          </>
-                      )}
-                    </button>
-                  )}
-               </div>
-               
-               {aiAnalysis && (
-                 <div className="bg-white/10 backdrop-blur-md rounded-xl p-5 text-sm leading-relaxed animate-in fade-in duration-700 border border-white/10">
-                    <div className="prose prose-invert max-w-none">
-                        {aiAnalysis.split('\n').map((line, i) => <p key={i} className="mb-2 last:mb-0">{line}</p>)}
+            {/* AI Analyst Section */}
+            <section className="mb-8">
+                <div className="bg-gradient-to-br from-blue-600 to-indigo-700 rounded-xl p-6 text-white shadow-lg relative overflow-hidden">
+                <div className="absolute top-0 right-0 p-4 opacity-10">
+                        <span className="material-symbols-outlined text-9xl">psychology</span>
+                </div>
+                <div className="relative z-10">
+                    <div className="flex flex-wrap justify-between items-start mb-4 gap-4">
+                        <div className="flex items-center gap-4">
+                            <div className="bg-white/20 p-2.5 rounded-xl backdrop-blur-sm">
+                                <span className="material-symbols-outlined text-white text-3xl">psychology</span>
+                            </div>
+                            <div>
+                            <h3 className="font-bold text-xl">AI Deal Analyst</h3>
+                            <p className="text-blue-100 text-sm font-medium opacity-90">Powered by Google Gemini 2.5 Flash</p>
+                            </div>
+                        </div>
+                        {!aiAnalysis && (
+                            <button 
+                            onClick={handleAiAnalyze} 
+                            disabled={loadingAi}
+                            className="bg-white text-blue-600 px-5 py-2.5 rounded-lg font-bold text-sm hover:bg-blue-50 disabled:opacity-70 disabled:cursor-not-allowed transition-all shadow-md flex items-center gap-2"
+                            >
+                            {loadingAi ? (
+                                <>
+                                    <span className="animate-spin material-symbols-outlined text-sm">refresh</span>
+                                    Analyzing Deal...
+                                </>
+                            ) : (
+                                <>
+                                    <span className="material-symbols-outlined text-sm">play_arrow</span>
+                                    Run Analysis
+                                </>
+                            )}
+                            </button>
+                        )}
                     </div>
-                 </div>
-               )}
-               {!aiAnalysis && !loadingAi && (
-                 <p className="text-blue-100 text-sm max-w-2xl opacity-80">
-                    Click to generate a comprehensive risk assessment, arbitrage opportunity detection, and economic rationale analysis for this specific swap structure using enterprise-grade cloud models.
-                 </p>
-               )}
+                    
+                    {aiAnalysis && (
+                        <div className="bg-white/10 backdrop-blur-md rounded-xl p-5 text-sm leading-relaxed animate-in fade-in duration-700 border border-white/10">
+                            <div className="prose prose-invert max-w-none">
+                                {aiAnalysis.split('\n').map((line, i) => <p key={i} className="mb-2 last:mb-0">{line}</p>)}
+                            </div>
+                        </div>
+                    )}
+                    {!aiAnalysis && !loadingAi && (
+                        <p className="text-blue-100 text-sm max-w-2xl opacity-80">
+                            Click to generate a comprehensive risk assessment, arbitrage opportunity detection, and economic rationale analysis for this specific swap structure using enterprise-grade cloud models.
+                        </p>
+                    )}
+                </div>
+                </div>
+            </section>
+
+            {/* Visuals */}
+            <h2 className="text-xl font-bold text-gray-900 mb-4">Leg Analysis</h2>
+            <section className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+                <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
+                <div className="flex justify-between items-start mb-6">
+                    <div>
+                        <h3 className="font-bold text-lg text-gray-900">Leg 1 ({deal.leg1.currency})</h3>
+                        <p className="text-sm text-gray-500">{deal.leg1.type} @ {deal.leg1.rate}%</p>
+                    </div>
+                    <span className="text-positive font-bold bg-green-50 px-3 py-1 rounded-full text-sm border border-green-100">
+                        NPV: {deal.leg1.currency} {result.leg1Npv.toLocaleString(undefined, {maximumFractionDigits: 0})}
+                    </span>
+                </div>
+                <div className="h-56 w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={curveData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                        <defs>
+                            <linearGradient id="colorLeg1" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#28a745" stopOpacity={0.2}/>
+                            <stop offset="95%" stopColor="#28a745" stopOpacity={0}/>
+                            </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
+                        <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fontSize: 12, fill: '#9ca3af'}} dy={10} />
+                        <YAxis axisLine={false} tickLine={false} tick={{fontSize: 12, fill: '#9ca3af'}} />
+                        <Tooltip contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}} />
+                        <Area type="monotone" dataKey="leg1" stroke="#28a745" strokeWidth={3} fillOpacity={1} fill="url(#colorLeg1)" name="Yield Curve %" />
+                    </AreaChart>
+                    </ResponsiveContainer>
+                </div>
+                <p className="text-gray-500 text-xs mt-4 text-center font-medium uppercase tracking-wide">Yield Curve Projection (5Y)</p>
+                </div>
+
+                <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
+                <div className="flex justify-between items-start mb-6">
+                    <div>
+                        <h3 className="font-bold text-lg text-gray-900">Leg 2 ({deal.leg2.currency})</h3>
+                        <p className="text-sm text-gray-500">{deal.leg2.type} @ {deal.leg2.rate}%</p>
+                    </div>
+                    <span className="text-negative font-bold bg-red-50 px-3 py-1 rounded-full text-sm border border-red-100">
+                        NPV: {deal.leg2.currency} {result.leg2Npv.toLocaleString(undefined, {maximumFractionDigits: 0})}
+                    </span>
+                </div>
+                <div className="h-56 w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={curveData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
+                        <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fontSize: 12, fill: '#9ca3af'}} dy={10} />
+                        <YAxis axisLine={false} tickLine={false} tick={{fontSize: 12, fill: '#9ca3af'}} />
+                        <Tooltip contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}} />
+                        <Line type="monotone" dataKey="leg2" stroke="#dc3545" strokeWidth={3} dot={{r: 4, strokeWidth: 2, fill: '#fff'}} activeDot={{r: 6}} name="Yield Curve %" />
+                    </LineChart>
+                    </ResponsiveContainer>
+                </div>
+                <p className="text-gray-500 text-xs mt-4 text-center font-medium uppercase tracking-wide">Yield Curve Projection (5Y)</p>
+                </div>
+            </section>
+
+            {/* Table */}
+            <section className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                <div className="p-6 border-b border-gray-200 flex justify-between items-center cursor-pointer hover:bg-gray-50 transition-colors" onClick={() => setShowCashflows(!showCashflows)}>
+                    <div>
+                    <h3 className="font-bold text-lg text-gray-900">Detailed Cashflow</h3>
+                    <p className="text-gray-500 text-sm">Projected flows for each leg.</p>
+                    </div>
+                    <div className={`bg-gray-100 p-2 rounded-full transition-transform duration-300 ${showCashflows ? 'rotate-180' : ''}`}>
+                        <span className="material-symbols-outlined text-gray-600">expand_more</span>
+                    </div>
+                </div>
+                
+                {showCashflows && (
+                <div className="overflow-x-auto">
+                    <table className="w-full text-sm text-left">
+                    <thead className="bg-gray-50 text-xs uppercase text-gray-500 font-semibold tracking-wide">
+                        <tr>
+                        <th className="px-6 py-4">Date</th>
+                        <th className="px-6 py-4 text-right">Leg 1 ({deal.leg1.currency})</th>
+                        <th className="px-6 py-4 text-right">Leg 2 ({deal.leg2.currency})</th>
+                        <th className="px-6 py-4 text-right">Discount Factor</th>
+                        <th className="px-6 py-4 text-right">PV (USD Eq)</th>
+                        </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                        {result.cashflows.map((row, idx) => (
+                        <tr key={idx} className="hover:bg-gray-50 transition-colors">
+                            <td className="px-6 py-4 font-medium text-gray-900">{row.date}</td>
+                            <td className="px-6 py-4 text-right text-positive font-medium font-mono tracking-tight">{row.leg1Flow.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                            <td className="px-6 py-4 text-right text-negative font-medium font-mono tracking-tight">{row.leg2Flow.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                            <td className="px-6 py-4 text-right text-gray-500 font-mono">{row.discountFactor.toFixed(4)}</td>
+                            <td className="px-6 py-4 text-right text-gray-900 font-medium font-mono">{row.presentValue.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                        </tr>
+                        ))}
+                    </tbody>
+                    </table>
+                </div>
+                )}
+            </section>
+        </div>
+      )}
+
+      {activeTab === 'code' && (
+        <div className="animate-in fade-in slide-in-from-bottom-2 duration-500">
+           <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+             <div className="flex justify-between items-center mb-6">
+               <div>
+                 <h3 className="font-bold text-lg text-gray-900">Export Pricing Model</h3>
+                 <p className="text-gray-500 text-sm">Generate executable code to verify this price in external systems.</p>
+               </div>
+               <div className="flex bg-gray-100 rounded-lg p-1 gap-1">
+                 <button 
+                    onClick={() => handleGenerateCode('python')}
+                    className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all ${codeLanguage === 'python' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                 >
+                   Python (QuantLib)
+                 </button>
+                 <button 
+                    onClick={() => handleGenerateCode('cpp')}
+                    className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all ${codeLanguage === 'cpp' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                 >
+                   C++ (ORE)
+                 </button>
+               </div>
+             </div>
+
+             <div className="relative group">
+                <div className="absolute right-4 top-4 opacity-0 group-hover:opacity-100 transition-opacity">
+                   <button 
+                     className="bg-white/10 hover:bg-white/20 text-white p-2 rounded-md backdrop-blur-sm border border-white/10"
+                     onClick={() => navigator.clipboard.writeText(generatedCode)}
+                     title="Copy Code"
+                   >
+                     <span className="material-symbols-outlined text-sm">content_copy</span>
+                   </button>
+                </div>
+                {loadingCode ? (
+                    <div className="h-96 w-full bg-gray-900 rounded-lg flex flex-col items-center justify-center text-gray-400 gap-4">
+                         <span className="material-symbols-outlined animate-spin text-4xl">settings</span>
+                         <p className="text-sm font-mono">Generating {codeLanguage === 'python' ? 'Python' : 'C++'} script...</p>
+                    </div>
+                ) : (
+                    <pre className="bg-gray-900 text-blue-300 p-6 rounded-lg overflow-x-auto font-mono text-sm leading-relaxed h-auto min-h-[400px] border border-gray-800">
+                        <code>{generatedCode}</code>
+                    </pre>
+                )}
+             </div>
+             <div className="mt-4 flex justify-end">
+                <button 
+                  onClick={() => handleGenerateCode(codeLanguage)}
+                  className="text-primary text-sm font-bold hover:underline flex items-center gap-1"
+                >
+                  <span className="material-symbols-outlined text-sm">refresh</span>
+                  Regenerate Code
+                </button>
+             </div>
            </div>
         </div>
-      </section>
-
-      {/* Visuals */}
-      <h2 className="text-xl font-bold text-gray-900 mb-4">Leg Analysis</h2>
-      <section className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-        <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
-           <div className="flex justify-between items-start mb-6">
-              <div>
-                  <h3 className="font-bold text-lg text-gray-900">Leg 1 ({deal.leg1.currency})</h3>
-                  <p className="text-sm text-gray-500">{deal.leg1.type} @ {deal.leg1.rate}%</p>
-              </div>
-              <span className="text-positive font-bold bg-green-50 px-3 py-1 rounded-full text-sm border border-green-100">
-                  NPV: {deal.leg1.currency} {result.leg1Npv.toLocaleString(undefined, {maximumFractionDigits: 0})}
-              </span>
-           </div>
-           <div className="h-56 w-full">
-             <ResponsiveContainer width="100%" height="100%">
-               <AreaChart data={curveData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="colorLeg1" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#28a745" stopOpacity={0.2}/>
-                      <stop offset="95%" stopColor="#28a745" stopOpacity={0}/>
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fontSize: 12, fill: '#9ca3af'}} dy={10} />
-                  <YAxis axisLine={false} tickLine={false} tick={{fontSize: 12, fill: '#9ca3af'}} />
-                  <Tooltip contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}} />
-                  <Area type="monotone" dataKey="leg1" stroke="#28a745" strokeWidth={3} fillOpacity={1} fill="url(#colorLeg1)" name="Yield Curve %" />
-               </AreaChart>
-             </ResponsiveContainer>
-           </div>
-           <p className="text-gray-500 text-xs mt-4 text-center font-medium uppercase tracking-wide">Yield Curve Projection (5Y)</p>
-        </div>
-
-        <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
-           <div className="flex justify-between items-start mb-6">
-              <div>
-                  <h3 className="font-bold text-lg text-gray-900">Leg 2 ({deal.leg2.currency})</h3>
-                  <p className="text-sm text-gray-500">{deal.leg2.type} @ {deal.leg2.rate}%</p>
-              </div>
-              <span className="text-negative font-bold bg-red-50 px-3 py-1 rounded-full text-sm border border-red-100">
-                  NPV: {deal.leg2.currency} {result.leg2Npv.toLocaleString(undefined, {maximumFractionDigits: 0})}
-              </span>
-           </div>
-           <div className="h-56 w-full">
-             <ResponsiveContainer width="100%" height="100%">
-               <LineChart data={curveData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fontSize: 12, fill: '#9ca3af'}} dy={10} />
-                  <YAxis axisLine={false} tickLine={false} tick={{fontSize: 12, fill: '#9ca3af'}} />
-                  <Tooltip contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}} />
-                  <Line type="monotone" dataKey="leg2" stroke="#dc3545" strokeWidth={3} dot={{r: 4, strokeWidth: 2, fill: '#fff'}} activeDot={{r: 6}} name="Yield Curve %" />
-               </LineChart>
-             </ResponsiveContainer>
-           </div>
-           <p className="text-gray-500 text-xs mt-4 text-center font-medium uppercase tracking-wide">Yield Curve Projection (5Y)</p>
-        </div>
-      </section>
-
-      {/* Table */}
-      <section className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-         <div className="p-6 border-b border-gray-200 flex justify-between items-center cursor-pointer hover:bg-gray-50 transition-colors" onClick={() => setShowCashflows(!showCashflows)}>
-            <div>
-              <h3 className="font-bold text-lg text-gray-900">Detailed Cashflow</h3>
-              <p className="text-gray-500 text-sm">Projected flows for each leg.</p>
-            </div>
-            <div className={`bg-gray-100 p-2 rounded-full transition-transform duration-300 ${showCashflows ? 'rotate-180' : ''}`}>
-                <span className="material-symbols-outlined text-gray-600">expand_more</span>
-            </div>
-         </div>
-         
-         {showCashflows && (
-           <div className="overflow-x-auto">
-             <table className="w-full text-sm text-left">
-               <thead className="bg-gray-50 text-xs uppercase text-gray-500 font-semibold tracking-wide">
-                 <tr>
-                   <th className="px-6 py-4">Date</th>
-                   <th className="px-6 py-4 text-right">Leg 1 ({deal.leg1.currency})</th>
-                   <th className="px-6 py-4 text-right">Leg 2 ({deal.leg2.currency})</th>
-                   <th className="px-6 py-4 text-right">Discount Factor</th>
-                   <th className="px-6 py-4 text-right">PV (USD Eq)</th>
-                 </tr>
-               </thead>
-               <tbody className="divide-y divide-gray-100">
-                 {result.cashflows.map((row, idx) => (
-                   <tr key={idx} className="hover:bg-gray-50 transition-colors">
-                     <td className="px-6 py-4 font-medium text-gray-900">{row.date}</td>
-                     <td className="px-6 py-4 text-right text-positive font-medium font-mono tracking-tight">{row.leg1Flow.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
-                     <td className="px-6 py-4 text-right text-negative font-medium font-mono tracking-tight">{row.leg2Flow.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
-                     <td className="px-6 py-4 text-right text-gray-500 font-mono">{row.discountFactor.toFixed(4)}</td>
-                     <td className="px-6 py-4 text-right text-gray-900 font-medium font-mono">{row.presentValue.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
-                   </tr>
-                 ))}
-               </tbody>
-             </table>
-           </div>
-         )}
-      </section>
+      )}
     </div>
   );
 };
